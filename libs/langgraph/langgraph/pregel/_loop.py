@@ -512,6 +512,13 @@ class PregelLoop:
                 self.output_keys,
             )
 
+        print("======= Tasks =======")
+        if len(self.tasks) > 0:
+            for task in self.tasks.values():
+                print(f"Task: {task.id}, {task.writes}")
+        else:
+            print("No tasks")
+
         # if no more tasks, we're done
         if not self.tasks:
             self.status = "done"
