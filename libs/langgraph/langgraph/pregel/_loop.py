@@ -248,7 +248,7 @@ class PregelLoop:
         self.retry_policy = retry_policy
         self.cache_policy = cache_policy
         self.durability = durability
-        self.task_ids_to_defer: list[str] = []
+        self.task_ids_to_block: list[str] = []
         if self.stream is not None and CONFIG_KEY_STREAM in config[CONF]:
             self.stream = DuplexStream(self.stream, config[CONF][CONFIG_KEY_STREAM])
         scratchpad: PregelScratchpad | None = config[CONF].get(CONFIG_KEY_SCRATCHPAD)
@@ -474,7 +474,7 @@ class PregelLoop:
 
         pending_ids = self._pending_interrupts()
         resume_map = self.config.get(CONF, {}).get(CONFIG_KEY_RESUME_MAP, {})
-        task_ids_to_defer: list[str] = []
+        task_ids_to_block: list[str] = []
 
         if resume_map:
             # collect interrupts that should not run this tick
@@ -485,11 +485,11 @@ class PregelLoop:
                     continue
                 interrupt_id = value[0].id
                 if interrupt_id in blocked_ids:
-                    task_ids_to_defer.append(task_id)
+                    task_ids_to_block.append(task_id)
                     # emit the interrupt so users still see '__interrupt__' in the graph result, even though it won't execute this tick
                     self.output_writes(task_id, [(write_type, value)])
 
-        self.task_ids_to_defer = task_ids_to_defer
+        self.task_ids_to_block = task_ids_to_block
 
         # produce debug output
         if self._checkpointer_put_after_previous is not None:
@@ -511,13 +511,6 @@ class PregelLoop:
                 self.prev_checkpoint_config,
                 self.output_keys,
             )
-
-        print("======= Tasks =======")
-        if len(self.tasks) > 0:
-            for task in self.tasks.values():
-                print(f"Task: {task.id}, {task.writes}")
-        else:
-            print("No tasks")
 
         # if no more tasks, we're done
         if not self.tasks:
