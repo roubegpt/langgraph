@@ -35,7 +35,6 @@ from langgraph.checkpoint.base import (
     CheckpointTuple,
     PendingWrite,
 )
-from xxhash import xxh3_128_hexdigest
 from langgraph.store.base import BaseStore
 from typing_extensions import ParamSpec, Self
 
@@ -447,6 +446,12 @@ class PregelLoop:
         Returns:
             True if more iterations are needed.
         """
+
+        # check if iteration limit is reached
+        if self.step > self.stop:
+            self.status = "out_of_steps"
+            return False
+
         # prepare next tasks
         self.tasks = prepare_next_tasks(
             self.checkpoint,
@@ -553,12 +558,13 @@ class PregelLoop:
             self._emit(
                 "values", map_output_values, self.output_keys, writes, self.channels
             )
-
         # clear pending writes but preserve pending interrupts
         pending_interrupts = self._pending_interrupts()
         if len(pending_interrupts) == 0:
             self.checkpoint_pending_writes.clear()
         else:
+            # for the task that are never handed off to the runner,
+            # the interrupt is still pending, so preserve it
             self.checkpoint_pending_writes = [
                 w for w in self.checkpoint_pending_writes 
                 if isinstance(w[2][0], Interrupt) 
