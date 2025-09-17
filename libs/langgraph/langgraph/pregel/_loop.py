@@ -22,7 +22,7 @@ from typing import (
     TypeVar,
     cast,
 )
-
+from langgraph.types import Interrupt
 from langchain_core.callbacks import AsyncParentRunManager, ParentRunManager
 from langchain_core.runnables import RunnableConfig
 from langgraph.cache.base import BaseCache
@@ -35,6 +35,7 @@ from langgraph.checkpoint.base import (
     CheckpointTuple,
     PendingWrite,
 )
+from xxhash import xxh3_128_hexdigest
 from langgraph.store.base import BaseStore
 from typing_extensions import ParamSpec, Self
 
@@ -248,6 +249,7 @@ class PregelLoop:
         self.retry_policy = retry_policy
         self.cache_policy = cache_policy
         self.durability = durability
+        self.task_ids_to_defer: list[str] = []
         if self.stream is not None and CONFIG_KEY_STREAM in config[CONF]:
             self.stream = DuplexStream(self.stream, config[CONF][CONFIG_KEY_STREAM])
         scratchpad: PregelScratchpad | None = config[CONF].get(CONFIG_KEY_SCRATCHPAD)
@@ -445,13 +447,28 @@ class PregelLoop:
         Returns:
             True if more iterations are needed.
         """
+        print(f"\n======= Tick {self.step} =======\n")
 
         # check if iteration limit is reached
         if self.step > self.stop:
             self.status = "out_of_steps"
             return False
 
+        pending_ids = self._pending_interrupts()
+        print(f"======= Pending IDs =======")
+        if len(pending_ids) > 0:
+            for interrupt_id in pending_ids:
+                    print(f"Pending ID: {interrupt_id}")
+        else:
+            print("No pending IDs")
+
         # prepare next tasks
+        print(f"======= Checkpoint Pending Writes =======")
+        if len(self.checkpoint_pending_writes) > 0:
+            for task_id, channel, value in self.checkpoint_pending_writes:
+                print(f"Checkpoint Pending Write: {task_id}, {channel}, {value}")
+        else:
+            print("No checkpoint pending writes")
         self.tasks = prepare_next_tasks(
             self.checkpoint,
             self.checkpoint_pending_writes,
@@ -470,6 +487,39 @@ class PregelLoop:
             retry_policy=self.retry_policy,
             cache_policy=self.cache_policy,
         )
+        print(f"======= Channels =======")
+        if len(self.channels) > 0:
+            for channel in self.channels.values():
+                try:
+                    print(f"Channel: {channel.get()}")
+                except Exception as e:
+                    print(f"Channel empty")
+        else:
+            print("No channels")
+        print(f"======= Tasks =======")
+        if len(self.tasks) > 0:
+            for task in self.tasks.values():
+                print(f"Task: {task.id}, {task.writes}")
+        else:
+            print("No tasks")
+
+        resume_map = self.config.get(CONF, {}).get(CONFIG_KEY_RESUME_MAP, {})
+        task_ids_to_defer: list[str] = []
+
+        if resume_map:
+            # interrupts that should not run this tick
+            blocked_ids = pending_ids - set(resume_map.keys())
+
+            for task_id, task in list(self.tasks.items()):
+                task_checkpoint_ns = (
+                    task.config.get(CONF, {}).get(CONFIG_KEY_CHECKPOINT_NS)
+                )
+                if task_checkpoint_ns:
+                    candidate_interrupt_id = xxh3_128_hexdigest(task_checkpoint_ns.encode())
+                    if candidate_interrupt_id in blocked_ids:
+                        task_ids_to_defer.append(task_id)
+
+        self.task_ids_to_defer = task_ids_to_defer
 
         # produce debug output
         if self._checkpointer_put_after_previous is not None:
@@ -538,8 +588,17 @@ class PregelLoop:
             self._emit(
                 "values", map_output_values, self.output_keys, writes, self.channels
             )
-        # clear pending writes
-        self.checkpoint_pending_writes.clear()
+        print("======= After tick =======")
+        print(f"Pending interrupts: {self._pending_interrupts()}")
+
+        # clear pending writes if not pending interrupt
+        pending_interrupts = self._pending_interrupts()
+        if len(pending_interrupts) == 0:
+            self.checkpoint_pending_writes.clear()
+        else:
+            self.checkpoint_pending_writes = [w for w in self.checkpoint_pending_writes if isinstance(w[2][0], Interrupt) and w[2][0].id in pending_interrupts]
+            print(f"checkpoint pending writes: {self.checkpoint_pending_writes}")
+
         # "not skip_done_tasks" only applies to first tick after resuming
         self.skip_done_tasks = True
         # save checkpoint
